@@ -51,8 +51,10 @@ def main():
             page.locator("#jobs-list .job-card").first.get_by_role("link", name="レビュー・出力へ").click()
             expect(page.locator("#annotation-editor")).to_contain_text("判定の確認")
             editor = page.locator("#annotation-editor")
-            editor.get_by_label("現象", exact=True).select_option("other")
-            editor.get_by_label("異常の確認", exact=True).select_option("false")
+            # Wrapped select labels include their option text in Playwright's
+            # label text query; scope to the editor and match the label prefix.
+            editor.get_by_label("現象").select_option("other")
+            editor.get_by_label("異常の確認").select_option("false")
             editor.get_by_label("スコア（未確定なら空欄）", exact=True).fill("1")
             editor.get_by_label("レビューのメモ（任意）", exact=True).fill("ブラウザから確認")
             with page.expect_response(lambda r: "/api/annotations/" in r.url and r.request.method == "PATCH") as response:
@@ -60,7 +62,7 @@ def main():
             reviewed = response.value.json()
             assert response.value.status == 200 and reviewed["reviewed"] and reviewed["origin"] == "demo", reviewed
             output = page.locator("#job-output")
-            output.get_by_label("出力する注釈", exact=True).select_option("reviewed")
+            output.get_by_label("出力する注釈").select_option("reviewed")
             with page.expect_response(lambda r: r.url.endswith("/exports") and r.request.method == "POST") as response:
                 page.locator("#create-export").click()
             export = response.value.json()
@@ -106,6 +108,8 @@ def main():
             print("Job:", job_id)
         finally:
             page.screenshot(path=str(artifacts / "last-page.png"), full_page=True)
+            (artifacts / "last-page.html").write_text(page.content())
+            (artifacts / "last-page-aria.txt").write_text(page.locator("body").aria_snapshot())
             (artifacts / "browser-errors.json").write_text(json.dumps(errors, ensure_ascii=False, indent=2))
             browser.close()
 
