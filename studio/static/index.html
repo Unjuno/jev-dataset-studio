@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="テキストの抽出、注釈、レビュー、データセット出力を行う作業環境。">
+  <title>Jev Dataset Studio</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">作業領域へ移動</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#recipe" aria-label="Jev Dataset Studio のレシピ画面">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>Jev <span class="brand-rest">Dataset Studio</span></span>
+      </a>
+      <nav id="navigation" aria-label="作業画面" hidden>
+        <a href="#recipe" data-page="recipe" aria-current="page">レシピ</a>
+        <a href="#jobs" data-page="jobs">ジョブ</a>
+        <a href="#review" data-page="review">レビュー・出力</a>
+      </nav>
+      <div class="workspace-tools">
+        <span id="session-badge" class="status-pill" hidden></span>
+        <button id="logout" class="button quiet compact" type="button" hidden>ログアウト</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="shell" tabindex="-1">
+    <p id="loading" class="surface loading">ワークスペースを読み込んでいます…</p>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div id="alert" class="notice error" role="alert" tabindex="-1" hidden></div>
+
+    <section id="login-panel" class="surface login-panel" aria-labelledby="login-heading" hidden>
+      <h1 id="login-heading">ワークスペースにログイン</h1>
+      <p class="muted">管理者から受け取ったアクセストークンを入力してください。</p>
+      <form id="login-form">
+        <label class="field">アクセストークン
+          <input id="access-token" type="password" autocomplete="current-password" maxlength="500" required>
+        </label>
+        <button class="button primary" type="submit">ログイン</button>
+      </form>
+    </section>
+
+    <div id="workspace" hidden>
+      <section id="recipe-page">
+        <div class="hero">
+          <div>
+            <p class="eyebrow"><span class="dot"></span> アノテーション作業台</p>
+            <h1 tabindex="-1">レシピを設計</h1>
+            <p>注釈する箇所と判定基準を決め、数件のプレビューで確認します。</p>
+          </div>
+          <div class="hero-actions">
+            <a id="jump-preview" class="button hero-link mobile-only" href="#preview-heading">プレビューへ <span aria-hidden="true">↓</span></a>
+            <a class="button hero-link" href="#jobs">ジョブ一覧へ <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+
+        <div class="workbench">
+          <div class="configuration">
+            <section class="surface" aria-labelledby="source-heading">
+              <div class="section-heading">
+                <span class="section-icon" aria-hidden="true">▤</span>
+                <div><h2 id="source-heading">データソース</h2><p>データを選び、参照する列を指定します。</p></div>
+              </div>
+              <div class="action-row source-actions">
+                <label class="button secondary file-button" for="upload-file"><span aria-hidden="true">↑</span> ファイルを取り込む</label>
+                <input id="upload-file" class="visually-hidden" type="file" accept=".csv,.json,.jsonl,.ndjson,.txt,.md,.parquet">
+                <button id="load-sample" class="button primary" type="button">サンプルを読み込む</button>
+              </div>
+              <p id="upload-hint" class="hint">CSV、JSON、JSONL、NDJSON、TXT、Markdown、Parquet</p>
+              <label class="field dataset-field">データセット
+                <select id="dataset-select"><option value="">データセットを選択</option></select>
+              </label>
+              <div id="dataset-detail" hidden>
+                <div id="dataset-meta" class="data-meta"></div>
+                <div class="field-grid three">
+                  <label class="field">本文列<select id="text-field"></select></label>
+                  <label class="field">ID 列<select id="id-field"></select></label>
+                  <label class="field">グループ列<select id="group-field"></select></label>
+                </div>
+                <details class="subdetails">
+                  <summary>取り込んだ行を確認</summary>
+                  <div id="sample-table" class="table-scroll" tabindex="0" role="region" aria-label="取り込んだデータの先頭行"></div>
+                </details>
+              </div>
+            </section>
+
+            <section class="surface" aria-labelledby="target-heading">
+              <div class="section-heading">
+                <span class="section-icon" aria-hidden="true">◎</span>
+                <div><h2 id="target-heading">対象と文脈</h2><p>文章の区切り方と、判定時に参照する範囲を設定します。</p></div>
+              </div>
+              <div class="field-grid">
+                <label class="field">候補の抽出方法<select id="target-mode"></select></label>
+                <label class="field">判定に使う文脈<select id="context-mode"></select></label>
+              </div>
+              <label id="term-field" class="field" hidden>検索語（1 行に 1 語）
+                <textarea id="target-terms" rows="3" placeholder="振動&#10;発熱"></textarea>
+              </label>
+              <label id="pattern-field" class="field" hidden>正規表現
+                <input id="target-pattern" type="text" maxlength="2000" placeholder="振動|発熱" spellcheck="false">
+              </label>
+              <label id="case-field" class="check" hidden><input id="ignore-case" type="checkbox">大文字と小文字を区別しない</label>
+              <details id="context-advanced" class="subdetails">
+                <summary>候補数と文脈の上限</summary>
+                <div class="field-grid three">
+                  <label class="field">1 行あたりの候補数<input id="max-candidates" type="number" min="1" max="2000" step="1"></label>
+                  <label id="window-field" class="field">前後の文字数<input id="window-chars" type="number" min="0" max="120000" step="1"></label>
+                  <label class="field">文脈の最大文字数<input id="max-context" type="number" min="1" max="120000" step="1"></label>
+                </div>
+              </details>
+            </section>
+
+            <section class="surface" aria-labelledby="features-heading">
+              <div class="section-heading">
+                <span class="section-icon" aria-hidden="true">≡</span>
+                <div><h2 id="features-heading">付与する特徴</h2><p>ラベル、判定やスコアの基準を定義します。</p></div>
+              </div>
+              <div id="feature-cards" class="card-stack"></div>
+              <button id="add-feature" class="button secondary" type="button">＋ 特徴を追加</button>
+            </section>
+
+            <section class="surface" aria-labelledby="quality-heading">
+              <div class="section-heading">
+                <span class="section-icon" aria-hidden="true">◈</span>
+                <div><h2 id="quality-heading">モデルと品質</h2><p>使用するモデルと、人が確認する条件を選びます。</p></div>
+              </div>
+              <div class="field-grid">
+                <label class="field">プロバイダー<select id="provider"></select></label>
+                <label class="field">モデル名<input id="model" type="text" maxlength="256"></label>
+              </div>
+              <p id="provider-note" class="inline-banner"></p>
+              <label class="field">品質プリセット
+                <select id="quality-preset">
+                  <option value="standard">標準</option>
+                  <option value="quick">速度を優先</option>
+                  <option value="cautious">人の確認を増やす</option>
+                  <option value="custom">手動設定</option>
+                </select>
+              </label>
+              <details class="subdetails">
+                <summary>しきい値と二次判定</summary>
+                <div class="field-grid three">
+                  <label class="field">最小信頼度<input id="min-confidence" type="number" min="0" max="1" step="any"></label>
+                  <label class="field">否定の上限<input id="boolean-low" type="number" min="0" max="0.5" step="any"></label>
+                  <label class="field">肯定の下限<input id="boolean-high" type="number" min="0.5" max="1" step="any"></label>
+                  <label class="field">監査抽出率<input id="audit-fraction" type="number" min="0" max="1" step="any"></label>
+                  <label class="field">スコア差の許容幅<input id="score-tolerance" type="number" min="0" max="9" step="any"></label>
+                </div>
+                <label class="check"><input id="secondary-enabled" type="checkbox">別の文脈で再判定する</label>
+                <div id="secondary-fields" class="field-grid three" hidden>
+                  <label class="field">二次判定の文脈<select id="secondary-mode"></select></label>
+                  <label id="secondary-window-field" class="field">前後の文字数<input id="secondary-window" type="number" min="0" max="120000" step="1"></label>
+                  <label class="field">最大文字数<input id="secondary-max" type="number" min="1" max="120000" step="1"></label>
+                </div>
+                <label class="check"><input id="verifier" type="checkbox">検証モデルを使う</label>
+                <p id="verifier-note" class="hint"></p>
+              </details>
+            </section>
+
+            <section class="surface" aria-labelledby="recipe-output-heading">
+              <div class="section-heading">
+                <span class="section-icon" aria-hidden="true">▦</span>
+                <div><h2 id="recipe-output-heading">出力ビュー</h2><p>行の単位と出力列を定義します。テンプレートに保存できます。</p></div>
+              </div>
+              <div id="recipe-output"></div>
+            </section>
+
+            <section class="surface" aria-labelledby="template-heading">
+              <div class="section-heading">
+                <span class="section-icon" aria-hidden="true">◇</span>
+                <div><h2 id="template-heading">テンプレート</h2><p>レシピと出力ビューを再利用します。</p></div>
+              </div>
+              <div class="field-grid button-field-grid">
+                <label class="field">保存済みテンプレート<select id="template-select"></select></label>
+                <button id="load-template" class="button secondary" type="button">読み込む</button>
+                <label class="field">レシピ・テンプレート名<input id="recipe-name" type="text" maxlength="200"></label>
+                <button id="save-template" class="button secondary" type="button">テンプレートを保存</button>
+              </div>
+            </section>
+
+            <section class="surface" aria-labelledby="job-create-heading">
+              <div class="section-heading">
+                <span class="section-icon" aria-hidden="true">▷</span>
+                <div><h2 id="job-create-heading" tabindex="-1">ジョブを実行</h2><p>現在のレシピでデータセット全体を処理します。</p></div>
+              </div>
+              <div class="field-grid">
+                <label class="field">最大リクエスト数<input id="job-max" type="number" min="1" max="1000000" step="1" value="10000"></label>
+                <label class="field">予算上限（USD、任意）<input id="job-budget" type="number" min="0" step="any" placeholder="上限なし"></label>
+              </div>
+              <div class="action-row"><button id="create-job" class="button primary" type="button">ジョブを作成 <span aria-hidden="true">→</span></button></div>
+            </section>
+          </div>
+          <aside class="preview-rail" aria-labelledby="preview-heading">
+            <section class="surface preview-surface">
+              <div class="section-heading">
+                <span class="section-icon" aria-hidden="true">◫</span>
+                <div><h2 id="preview-heading" tabindex="-1">プレビュー</h2><p>ジョブ作成前に抽出箇所と判定を照合します。</p></div>
+              </div>
+              <div class="preview-actions">
+                <label class="field">対象行数<input id="preview-limit" type="number" min="1" max="20" step="1" value="3"></label>
+                <button id="run-preview" class="button primary" type="button">プレビューを実行 <span aria-hidden="true">→</span></button>
+              </div>
+              <details class="subdetails preview-settings">
+                <summary>実行上限</summary>
+                <label class="field">最大リクエスト数<input id="preview-max" type="number" min="1" max="1000" step="1" value="100"></label>
+              </details>
+              <div id="preview-content" class="preview-content"></div>
+              <a id="jump-job-create" class="button secondary compact preview-next" href="#job-create-heading" hidden>ジョブ設定へ <span aria-hidden="true">↓</span></a>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section id="jobs-page" hidden>
+        <div class="hero">
+          <div>
+            <p class="eyebrow"><span class="dot"></span> バッチ処理</p>
+            <h1 tabindex="-1">ジョブ</h1>
+            <p>処理の進捗と失敗した行を確認します。</p>
+          </div>
+          <button id="refresh-jobs" class="button hero-link" type="button">一覧を更新 <span aria-hidden="true">↻</span></button>
+        </div>
+        <div id="jobs-list" class="card-stack"></div>
+      </section>
+
+      <section id="review-page" hidden>
+        <div class="hero">
+          <div>
+            <p class="eyebrow"><span class="dot"></span> データセットの確認</p>
+            <h1 tabindex="-1">レビュー・出力</h1>
+            <p>元の文章を確認して注釈を編集し、必要な列を ZIP で出力します。</p>
+          </div>
+          <a class="button hero-link" href="#jobs">ジョブ一覧へ <span aria-hidden="true">↗</span></a>
+        </div>
+        <section class="surface review-toolbar">
+          <div class="field-grid button-field-grid">
+            <label class="field">レビューするジョブ<select id="review-job"></select></label>
+            <button id="refresh-review" class="button secondary" type="button">注釈を再読み込み</button>
+          </div>
+          <p id="review-job-meta" class="hint" hidden></p>
+        </section>
+        <div id="review-workbench" class="review-workbench" hidden>
+          <section class="surface" aria-labelledby="annotations-heading">
+            <div class="section-heading">
+              <span class="section-icon" aria-hidden="true">✓</span>
+              <div><h2 id="annotations-heading">注釈レビュー</h2><p id="annotation-summary"></p></div>
+            </div>
+            <div class="field-grid">
+              <label class="field">注釈の状態<select id="annotation-filter">
+                <option value="all">すべて</option><option value="review">要確認</option>
+                <option value="accepted">採用済み</option><option value="excluded">除外済み</option>
+              </select></label>
+              <label class="field">確認する箇所<select id="annotation-select"></select></label>
+            </div>
+            <div id="annotation-pagination" class="pagination"></div>
+            <div id="annotation-editor"></div>
+          </section>
+          <section class="surface" aria-labelledby="export-heading">
+            <div class="section-heading">
+              <span class="section-icon" aria-hidden="true">↓</span>
+              <div><h2 id="export-heading">ZIP 出力</h2><p>データ、元のレシピ、モデルの判定とレビュー履歴をまとめます。</p></div>
+            </div>
+            <p id="export-provider-note" class="inline-banner" hidden></p>
+            <div class="field-grid button-field-grid">
+              <label class="field">既存の出力ビュー<select id="export-template-select"></select></label>
+              <button id="load-export-template" class="button secondary" type="button">ビューを適用</button>
+            </div>
+            <div id="job-output"></div>
+            <div class="action-row"><button id="create-export" class="button primary" type="button" disabled>ZIP を作成</button></div>
+            <div id="export-result" class="export-result" role="status" hidden></div>
+          </section>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer"><div>Jev Dataset Studio</div><div>テキスト抽出・注釈・レビュー</div></footer>
+</body>
+</html>

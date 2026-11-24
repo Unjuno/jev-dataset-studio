@@ -1,0 +1,6 @@
+{"id": "note-001", "equipment": "pump-A", "text": "ポンプAで振動が増加した。点検を実施し、軸受の交換を検討する。"}
+{"id": "note-002", "equipment": "pump-A", "text": "ポンプAの振動は正常範囲だった。発熱は認められない。"}
+{"id": "note-003", "equipment": "motor-B", "text": "モーターBが発熱したため停止した。振動の有無はまだ確認できていない。"}
+{"id": "note-004", "equipment": "valve-C", "text": "バルブCを目視点検した。異常はないとの報告だが、測定記録が不足している。"}
+{"id": "note-005", "equipment": "sensor-D", "text": "センサーD🔧の信号を確認した。信号は一度途切れたが、その後は安定している。"}
+{"id": "note-006", "equipment": "fan-E", "text": "ファンEで異音が発生した。異音は清掃後も続いた。再点検が必要だ。"}

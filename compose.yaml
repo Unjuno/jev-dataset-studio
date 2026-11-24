@@ -1,0 +1,58 @@
+name: jev-dataset-studio
+
+x-studio: &studio
+  build: .
+  image: jev-dataset-studio:local
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    STUDIO_DATA_DIR: /app/data
+    DATABASE_URL: postgresql+psycopg://studio:${POSTGRES_PASSWORD:-studio-local-development}@db:5432/studio
+  volumes:
+    - studio_data:/app/data
+  init: true
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: studio
+      POSTGRES_USER: studio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-studio-local-development}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studio -d studio"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  web:
+    <<: *studio
+    command: ["jev-studio", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    <<: *studio
+    command: ["jev-studio", "worker"]
+    depends_on:
+      web:
+        condition: service_healthy
+
+volumes:
+  studio_data:
+  postgres_data:
