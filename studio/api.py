@@ -26,7 +26,7 @@ from .runtime import BudgetExceeded, RequestBudget, ensure_providers, make_provi
 from .schemas import Recipe
 from .settings import Settings
 from .templates import SAMPLE, builtin_templates
-from .worker import finish_job
+from .worker import finish_job, stop_job
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +293,7 @@ def create_app(settings=None):
 
     @api.post("/templates")
     def save_template(body: TemplateInput, owner=Depends(workspace)):
+        body.export_spec.validate_roles(body.recipe)
         with database.session() as session:
             template = Template(owner=owner, name=body.name, recipe=body.recipe.model_dump(mode="json"),
                                 export_spec=body.export_spec.model_dump(mode="json"))
@@ -366,9 +367,9 @@ def create_app(settings=None):
         with database.session() as session:
             job = owned(session, Job, job_id, owner, lock=True)
             if action == "pause" and job.status in {"queued", "running"}:
-                job.status = "paused"
+                stop_job(session, job, "paused")
             elif action == "cancel" and job.status in {"queued", "running", "paused"}:
-                job.status = "cancelled"
+                stop_job(session, job, "cancelled")
             elif action == "resume" and job.status == "paused":
                 if body and body.max_requests is not None:
                     job.max_requests = body.max_requests
@@ -383,8 +384,8 @@ def create_app(settings=None):
             else:
                 raise HTTPException(409, "この状態では実行できません / Action is not valid in the current job state.")
             job.updated_at = time.time()
-        finish_job(database, job_id)
-        return get_job(job_id, owner)
+            finish_job(session, job)
+            return job_summary(session, job)
 
     @api.get("/jobs/{job_id}/annotations")
     def list_annotations(job_id: str, status: Literal["all", "accepted", "review", "excluded"] = "all",

@@ -4,7 +4,7 @@ import logging
 import time
 from threading import Event
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, or_, select, update
 
 from .db import Annotation, Job, Record, WorkItem, uid
 from .providers import ProviderError
@@ -14,16 +14,24 @@ from .schemas import Recipe
 logger = logging.getLogger(__name__)
 
 
-def finish_job(database, job_id):
-    with database.session() as session:
-        counts = dict(session.execute(select(WorkItem.status, func.count()).where(
-            WorkItem.job_id == job_id,
-        ).group_by(WorkItem.status)).all())
-        if not counts.get("pending") and not counts.get("running"):
-            session.execute(update(Job).where(Job.id == job_id, Job.status.in_(["queued", "running"])).values(
-                status="completed_with_errors" if counts.get("failed") else "completed",
-                updated_at=time.time(),
-            ))
+def finish_job(session, job):
+    """Finalize under the caller's job lock, in the same commit as the last item."""
+    if job.status not in {"queued", "running"}:
+        return
+    items = select(WorkItem.id).where(WorkItem.job_id == job.id)
+    if session.scalar(select(items.where(WorkItem.status.in_(["pending", "running"])).exists())):
+        return
+    failed = session.scalar(select(items.where(WorkItem.status == "failed").exists()))
+    job.status = "completed_with_errors" if failed else "completed"
+    job.updated_at = time.time()
+
+
+def stop_job(session, job, status):
+    """Fence in-flight successes and failures even if the job resumes immediately."""
+    job.status, job.updated_at = status, time.time()
+    session.execute(update(WorkItem).where(
+        WorkItem.job_id == job.id, WorkItem.status == "running",
+    ).values(status="pending", lease_token=None, lease_until=0, attempts=WorkItem.attempts - 1))
 
 
 class Worker:
@@ -57,12 +65,12 @@ class Worker:
             ))
         return claim
 
-    def _item(self, session, item_id, job_id, token, *, allow_stopped=False):
+    def _item(self, session, item_id, job_id, token):
         job = session.scalar(select(Job).where(Job.id == job_id).with_for_update())
         item = session.scalar(select(WorkItem).where(WorkItem.id == item_id).with_for_update())
         if not item or item.lease_token != token or item.status != "running" or item.lease_until < time.time():
             raise JobInterrupted("Worker lease no longer belongs to this attempt.")
-        if not allow_stopped and job.status not in {"running", "queued"}:
+        if job.status not in {"running", "queued"}:
             raise JobInterrupted("Job stopped while this record was running.")
         return job, item
 
@@ -97,24 +105,17 @@ class Worker:
                 item.error = ""
                 item.result = {"annotations": len(annotations), "cache_hits": budget.cache_hits,
                                "no_targets": not annotations}
+                finish_job(session, job)
         except BudgetExceeded as error:
             try:
                 with self.database.session() as session:
-                    job, item = self._item(session, item_id, job_id, token, allow_stopped=True)
-                    if job.status in {"queued", "running"}:
-                        job.status, job.message = "paused", str(error)
-                    item.status, item.lease_token, item.lease_until = "pending", None, 0
-                    item.attempts = max(0, item.attempts - 1)
+                    job, _ = self._item(session, item_id, job_id, token)
+                    stop_job(session, job, "paused")
+                    job.message = str(error)
             except JobInterrupted:
-                pass
+                self._release_interrupted(item_id, token)
         except JobInterrupted:
-            # A paused attempt can release its own lease; a stale attempt cannot.
-            with self.database.session() as session:
-                session.execute(update(WorkItem).where(
-                    WorkItem.id == item_id, WorkItem.status == "running", WorkItem.lease_token == token,
-                    WorkItem.lease_until >= time.time(),
-                ).values(status="pending", lease_token=None, lease_until=0,
-                         attempts=WorkItem.attempts - 1))
+            self._release_interrupted(item_id, token)
         except Exception as error:
             retryable = isinstance(error, ProviderError) and error.retryable
             safe_message = str(error) if isinstance(error, (ProviderError, ValueError)) else "Internal processing error; inspect server logs using the job ID."
@@ -123,15 +124,25 @@ class Worker:
                 logger.error("Job %s work item %s failed (%s)", job_id, item_id, type(error).__name__)
             try:
                 with self.database.session() as session:
-                    _job, item = self._item(session, item_id, job_id, token, allow_stopped=True)
+                    job, item = self._item(session, item_id, job_id, token)
                     item.status = "pending" if retryable and item.attempts < self.settings.max_attempts else "failed"
-                    item.available_at = time.time() + min(30, 2 ** item.attempts)
+                    if item.status == "pending":
+                        item.available_at = time.time() + min(30, 2 ** item.attempts)
                     item.error = safe_message[:1000]
                     item.lease_token, item.lease_until = None, 0
+                    if item.status == "failed":
+                        finish_job(session, job)
             except JobInterrupted:
-                pass
-        finish_job(self.database, job_id)
+                self._release_interrupted(item_id, token)
         return True
+
+    def _release_interrupted(self, item_id, token):
+        # A claim racing with a stop may release its own lease, never a replacement.
+        with self.database.session() as session:
+            session.execute(update(WorkItem).where(
+                WorkItem.id == item_id, WorkItem.status == "running", WorkItem.lease_token == token,
+                WorkItem.lease_until >= time.time(),
+            ).values(status="pending", lease_token=None, lease_until=0, attempts=WorkItem.attempts - 1))
 
     def run_forever(self, stop: Event | None = None):
         stop = stop or Event()

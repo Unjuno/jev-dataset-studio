@@ -18,8 +18,8 @@ from .ingest import source_id
 from .schemas import Recipe, canonical_hash
 
 
-def json_text(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(",", ":"))
+def json_text(value, *, sort_keys=True) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=sort_keys, allow_nan=False, separators=(",", ":"))
 
 
 class Column(BaseModel):
@@ -58,13 +58,25 @@ class ExportSpec(BaseModel):
     def valid_columns(self):
         if len({c.name for c in self.columns}) != len(self.columns):
             raise ValueError("Output column names must be unique.")
-        inputs = {c.source for c in self.columns if c.role == "input"}
-        targets = {c.source for c in self.columns if c.role == "target"}
-        if inputs & targets:
-            raise ValueError("The same source value cannot be both an input and a target column.")
+        self.validate_roles()
         if self.include_empty and self.grain != "document":
             raise ValueError("Empty-source rows can only be included in document grain.")
         return self
+
+    def validate_roles(self, recipe: Recipe | None = None):
+        aliases = {}
+        if recipe:
+            aliases["text"] = "source." + recipe.source.text_field
+            if recipe.source.id_field:
+                aliases["source_id"] = "source." + recipe.source.id_field
+            if recipe.target.mode == "document" and self.grain != "document":
+                aliases["target.text"] = aliases["text"]
+            if self.grain == "annotation" and len(recipe.features) == 1:
+                aliases["value"] = "features." + recipe.features[0].id
+        inputs = {aliases.get(c.source, c.source) for c in self.columns if c.role == "input"}
+        targets = {aliases.get(c.source, c.source) for c in self.columns if c.role == "target"}
+        if inputs & targets:
+            raise ValueError("The same source value cannot be both an input and a target column.")
 
 
 def record_splits(records: list, recipe: Recipe, spec: SplitSpec) -> dict[str, str]:
@@ -136,31 +148,67 @@ def _column_value(column, record, annotations, recipe, split, grain, feature_id=
     return values if grain == "document" else values[0]
 
 
-def _serialize(rows: list[dict], spec: ExportSpec) -> bytes:
+_PARQUET_TYPE_ERROR = "This view contains incompatible column types for Parquet. Use JSONL or choose consistent fields."
+
+
+def _parquet_schema(data, spec, recipe):
+    import pyarrow as pa
+    feature_types = {"boolean": pa.bool_(), "multi_label": pa.list_(pa.string()),
+                     "choice": pa.string(), "score": pa.float64()}
+    annotation_types = {"target.start": pa.int64(), "target.end": pa.int64(), "target.text": pa.string(),
+                        "reviewed": pa.bool_(), "status": pa.string(), "origin": pa.string()}
+    for feature in recipe.features:
+        annotation_types["features." + feature.id] = feature_types[feature.kind]
+    known = {name: pa.list_(dtype) if spec.grain == "document" else dtype
+             for name, dtype in annotation_types.items()}
+    for name in ("text", "source." + recipe.source.text_field, "source_id", "split", "feature_id"):
+        known[name] = pa.string()
+    kinds = {f.kind for f in recipe.features}
+    if len(kinds) == 1:
+        known["value"] = feature_types[kinds.pop()]
+    fields = []
+    for column in spec.columns:
+        dtype = known.get(column.source)
+        if dtype is None:
+            try:
+                # Arbitrary source fields and mixed-feature values need all selected folds.
+                dtype = pa.array([row[column.name] for rows in data.values() for row in rows]).type
+            except (pa.ArrowException, TypeError, ValueError, OverflowError) as error:
+                raise ValueError(_PARQUET_TYPE_ERROR) from error
+        fields.append((column.name, dtype))
+    return pa.schema(fields)
+
+
+def _serialize(rows: list[dict], spec: ExportSpec, schema=None) -> bytes:
     if spec.format == "jsonl":
-        return "".join(json_text(r) + "\n" for r in rows).encode()
+        return "".join(json_text(r, sort_keys=False) + "\n" for r in rows).encode()
     if spec.format == "parquet":
         import pyarrow as pa
         import pyarrow.parquet as pq
         sink = pa.BufferOutputStream()
         try:
-            table = pa.Table.from_pylist(rows) if rows else pa.table({c.name: [] for c in spec.columns})
+            table = pa.Table.from_pylist(rows, schema=schema)
             pq.write_table(table, sink)
-        except (pa.ArrowException, TypeError, ValueError) as error:
-            raise ValueError("This view contains incompatible column types for Parquet. Use JSONL or choose consistent fields.") from error
+        except (pa.ArrowException, TypeError, ValueError, OverflowError) as error:
+            raise ValueError(_PARQUET_TYPE_ERROR) from error
         return sink.getvalue().to_pybytes()
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=[c.name for c in spec.columns], lineterminator="\n")
-    writer.writeheader()
+
+    def cell(value):
+        if isinstance(value, (dict, list)):
+            value = json_text(value)
+        if spec.csv_escape_formulas and isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+            return "'" + value
+        return value
+
+    names = [c.name for c in spec.columns]
+    header = [cell(name) for name in names]
+    if len(set(header)) != len(header):
+        raise ValueError("CSV column names must remain unique after formula escaping.")
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow(header)
     for row in rows:
-        safe = {}
-        for key, value in row.items():
-            if isinstance(value, (dict, list)):
-                value = json_text(value)
-            if spec.csv_escape_formulas and isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
-                value = "'" + value
-            safe[key] = value
-        writer.writerow(safe)
+        writer.writerow(cell(row[name]) for name in names)
     return output.getvalue().encode("utf-8-sig")
 
 
@@ -172,12 +220,17 @@ def create_export(database, settings, owner: str, job_id: str, spec: ExportSpec)
         if not job:
             raise LookupError("Job not found.")
         recipe = Recipe.model_validate(job.recipe)
+        spec.validate_roles(recipe)
         dataset = session.get(Dataset, job.dataset_id)
         records = list(session.scalars(select(Record).where(Record.dataset_id == job.dataset_id).order_by(Record.position)))
-        query = select(Annotation).where(Annotation.job_id == job_id).order_by(Annotation.record_id, Annotation.target["start"].as_integer())
+        query = select(Annotation).where(Annotation.job_id == job_id, Annotation.owner == owner).order_by(
+            Annotation.record_id, Annotation.target["start"].as_integer(),
+        )
         annotations = list(session.scalars(query))
         processing = {w.record_id: w for w in session.scalars(select(WorkItem).where(WorkItem.job_id == job_id))}
-        reviews = list(session.scalars(select(Review).where(Review.annotation_id.in_([a.id for a in annotations])))) if annotations else []
+        reviews = list(session.scalars(select(Review).join(Annotation, Annotation.id == Review.annotation_id).where(
+            Annotation.job_id == job_id, Annotation.owner == owner, Review.owner == owner,
+        ).order_by(Review.annotation_id, Review.previous_revision)))
         # All scalar/JSON objects below are detached snapshot data, not lazy DB relationships.
         session.expunge_all()
     allowed = {"source_id", "text", "target.text", "target.start", "target.end", "status", "origin", "reviewed", "split"}
@@ -227,7 +280,8 @@ def create_export(database, settings, owner: str, job_id: str, spec: ExportSpec)
     else:
         data.setdefault("dataset", [])
     export_id = uid()
-    files = {f"{split}.{spec.format}": _serialize(rows, spec) for split, rows in data.items()}
+    schema = _parquet_schema(data, spec, recipe) if spec.format == "parquet" else None
+    files = {f"{split}.{spec.format}": _serialize(rows, spec, schema) for split, rows in data.items()}
     manifest = {
         "version": 1, "export_id": export_id, "job_id": job_id, "dataset_id": dataset.id,
         "dataset_name": dataset.name, "source_sha256": dataset.checksum,

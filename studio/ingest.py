@@ -47,6 +47,20 @@ def _jsonable(value):
     raise ValueError(f"Unsupported input value type: {type(value).__name__}")
 
 
+def _check_parquet_fields(fields):
+    import pyarrow as pa
+    seen = set()
+    for field in fields:
+        if field.name in seen:
+            raise ValueError("Duplicate Parquet field names are not supported.")
+        seen.add(field.name)
+        dtype = field.type
+        while isinstance(dtype, pa.BaseExtensionType) or pa.types.is_dictionary(dtype):
+            dtype = dtype.storage_type if isinstance(dtype, pa.BaseExtensionType) else dtype.value_type
+        if dtype.num_fields:
+            _check_parquet_fields(dtype.field(i) for i in range(dtype.num_fields))
+
+
 def parse_upload(filename: str, data: bytes, settings) -> tuple[list[dict], list[str], str]:
     if not data:
         raise ValueError("ファイルが空です / The file is empty.")
@@ -64,6 +78,7 @@ def parse_upload(filename: str, data: bytes, settings) -> tuple[list[dict], list
         decoded_size = sum(source.metadata.row_group(i).total_byte_size for i in range(source.num_row_groups))
         if decoded_size > settings.max_upload_bytes * 5:
             raise ValueError("Decoded Parquet data exceeds the memory limit.")
+        _check_parquet_fields(source.schema_arrow)
         rows = [_jsonable(r) for r in source.read().to_pylist()]
     else:
         try:
@@ -84,8 +99,8 @@ def parse_upload(filename: str, data: bytes, settings) -> tuple[list[dict], list
                 if len(rows) > settings.max_rows:
                     raise ValueError("Too many rows.")
         elif suffix in {".jsonl", ".ndjson"}:
-            for number, line in enumerate(text.splitlines(), 1):
-                if not line.strip():
+            for number, line in enumerate(text.split("\n"), 1):
+                if not line.strip(" \t\r"):
                     continue
                 try:
                     rows.append(json.loads(line, parse_constant=_reject_constant, object_pairs_hook=_unique_object))

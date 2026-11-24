@@ -50,6 +50,7 @@ let liveModel;
 let activeJob;
 let reviewOffset = 0;
 let reviewStatus = "all";
+let pendingReviewQuery;
 let reviewResult;
 let currentAnnotation;
 let reviewRequest = 0;
@@ -193,6 +194,7 @@ function lockWorkspace() {
   recipeOutput = null;
   jobOutput = null;
   activeJob = null;
+  pendingReviewQuery = null;
   reviewResult = null;
   currentAnnotation = null;
   for (const id of ["preview-content", "sample-table", "jobs-list", "annotation-editor", "feature-cards",
@@ -1222,6 +1224,7 @@ async function openReviewJob(id) {
   const request = ++reviewRequest;
   reviewOffset = 0;
   reviewStatus = "all";
+  pendingReviewQuery = null;
   reviewResult = null;
   currentAnnotation = null;
   activeJob = null;
@@ -1247,10 +1250,15 @@ async function openReviewJob(id) {
   await loadAnnotations();
 }
 
-async function loadAnnotations({ offset = reviewOffset, status = reviewStatus, preferred = currentAnnotation?.id } = {}) {
+async function loadAnnotations({
+  offset = pendingReviewQuery?.offset ?? reviewOffset,
+  status = pendingReviewQuery?.status ?? reviewStatus,
+  preferred = currentAnnotation?.id,
+} = {}) {
   if (!activeJob) return false;
   const request = ++reviewRequest;
   const jobId = activeJob.id;
+  pendingReviewQuery = { offset, status };
   const current = () => request === reviewRequest && activeJob?.id === jobId;
   let result;
   try {
@@ -1264,9 +1272,11 @@ async function loadAnnotations({ offset = reviewOffset, status = reviewStatus, p
     }
   } catch (error) {
     if (!current()) return false;
+    pendingReviewQuery = null;
     $("annotation-filter").value = reviewStatus;
     throw error;
   }
+  pendingReviewQuery = null;
   reviewOffset = offset;
   reviewStatus = status;
   $("annotation-filter").value = status;
